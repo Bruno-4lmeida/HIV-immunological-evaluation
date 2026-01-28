@@ -1,0 +1,8 @@
+cff-version: 1.2.0
+title: "HIV immunological evaluation"
+authors:
+  - family-names: Almeida Silva
+    given-names: Bruno
+year: 2026
+license: MIT
+repository-code: https://github.com/SEU_USUARIO/HIV-immunological-evaluation
