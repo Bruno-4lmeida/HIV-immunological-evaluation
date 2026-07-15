@@ -1765,94 +1765,203 @@ write_xlsx(
 cat("Saved:", file.path(results_path, "roc_confusion_logistic_zlog.xlsx"), "\n\n")
 
 
-#### 18. INTERNAL BOOTSTRAP VALIDATION FOR AUC ####
+#### 18. OPTIMISM-CORRECTED INTERNAL BOOTSTRAP VALIDATION ####
 
-cat("--- 18. Internal bootstrap validation for AUC ---\n")
+cat("--- 18. Optimism-corrected internal bootstrap validation ---\n")
 
 set.seed(123)
-
 B <- 1000
 
-formula_boot <- formula(modelo_logistico2)
-
-boot_auc <- replicate(B, {
-  
-  idx <- sample(
-    seq_len(nrow(modelo_log_data2)),
-    replace = TRUE
-  )
-  
-  boot_data <- modelo_log_data2[idx, ]
-  
-  # Skip samples with only one outcome class
-  if (length(unique(boot_data$outcome_cd4_350)) < 2) {
+# Safe AUC calculation with the same outcome orientation used in the main model.
+safe_auc2 <- function(response, predictor) {
+  if (length(unique(response[!is.na(response)])) < 2 || all(is.na(predictor))) {
     return(NA_real_)
   }
-  
-  fit_boot <- tryCatch(
-    glm(
-      formula_boot,
-      data = boot_data,
-      family = binomial
-    ),
-    error = function(e) NULL
-  )
-  
-  if (is.null(fit_boot)) {
-    return(NA_real_)
-  }
-  
-  pred_boot <- tryCatch(
-    predict(
-      fit_boot,
-      newdata = modelo_log_data2,
-      type = "response"
-    ),
-    error = function(e) rep(NA_real_, nrow(modelo_log_data2))
-  )
-  
-  if (all(is.na(pred_boot))) {
-    return(NA_real_)
-  }
-  
-  roc_boot <- tryCatch(
+  roc_object <- tryCatch(
     pROC::roc(
-      response = modelo_log_data2$outcome_cd4_350,
-      predictor = pred_boot,
+      response = response,
+      predictor = predictor,
       levels = c("No", "Yes"),
       direction = "<",
       quiet = TRUE
     ),
     error = function(e) NULL
   )
-  
-  if (is.null(roc_boot)) {
-    return(NA_real_)
+  if (is.null(roc_object)) NA_real_ else as.numeric(pROC::auc(roc_object))
+}
+
+# Repeat the complete model-development procedure in each bootstrap sample:
+# univariable screening at p <= 0.20, forced inclusion of sex, model fitting,
+# and performance assessment in both the bootstrap and original samples.
+run_bootstrap_validation2 <- function(iteration) {
+  idx <- sample.int(
+    n = nrow(modelo_log_data2),
+    size = nrow(modelo_log_data2),
+    replace = TRUE
+  )
+  boot_data <- modelo_log_data2[idx, , drop = FALSE]
+
+  if (length(unique(boot_data$outcome_cd4_350)) < 2) {
+    return(tibble(
+      iteration = iteration,
+      AUC_bootstrap_sample = NA_real_,
+      AUC_original_sample = NA_real_,
+      optimism = NA_real_,
+      selected_predictors = NA_character_
+    ))
   }
-  
-  as.numeric(pROC::auc(roc_boot))
-})
 
-boot_auc <- boot_auc[!is.na(boot_auc)]
+  boot_univariable <- purrr::map_dfr(
+    candidate_predictors_logistic2,
+    function(predictor_name) {
+      f_univ <- as.formula(
+        paste0("outcome_cd4_350 ~ ", predictor_name)
+      )
+      fit_univ <- tryCatch(
+        glm(f_univ, data = boot_data, family = binomial),
+        error = function(e) NULL
+      )
+      if (is.null(fit_univ)) {
+        return(tibble(predictor = predictor_name, min_p = Inf))
+      }
+      p_values <- tryCatch(
+        broom::tidy(fit_univ) %>%
+          filter(term != "(Intercept)") %>%
+          pull(p.value),
+        error = function(e) numeric(0)
+      )
+      min_p_value <- if (length(p_values) == 0 || all(is.na(p_values))) {
+        Inf
+      } else {
+        min(p_values, na.rm = TRUE)
+      }
+      tibble(predictor = predictor_name, min_p = min_p_value)
+    }
+  )
 
-bootstrap_auc_summary <- tibble(
-  n_bootstrap_valid = length(boot_auc),
-  AUC_apparent = auc_value2,
-  AUC_bootstrap_mean = mean(boot_auc),
-  AUC_bootstrap_median = median(boot_auc),
-  AUC_bootstrap_CI_low = as.numeric(quantile(boot_auc, 0.025)),
-  AUC_bootstrap_CI_high = as.numeric(quantile(boot_auc, 0.975)),
-  optimism = auc_value2 - mean(boot_auc)
+  selected_boot <- boot_univariable %>%
+    filter(min_p <= 0.20) %>%
+    pull(predictor)
+
+  selected_boot <- unique(c("sexo", selected_boot))
+
+  # Reproduce the fallback rule used in the original model-development code.
+  if (length(selected_boot) == 1) {
+    selected_boot <- c("sexo", "z_idade", "z_Log")
+  }
+
+  formula_boot <- as.formula(
+    paste(
+      "outcome_cd4_350 ~",
+      paste(selected_boot, collapse = " + ")
+    )
+  )
+
+  fit_boot <- tryCatch(
+    suppressWarnings(
+      glm(formula_boot, data = boot_data, family = binomial)
+    ),
+    error = function(e) NULL
+  )
+
+  if (is.null(fit_boot) || !isTRUE(fit_boot$converged)) {
+    return(tibble(
+      iteration = iteration,
+      AUC_bootstrap_sample = NA_real_,
+      AUC_original_sample = NA_real_,
+      optimism = NA_real_,
+      selected_predictors = paste(selected_boot, collapse = ";")
+    ))
+  }
+
+  pred_bootstrap_sample <- tryCatch(
+    predict(fit_boot, newdata = boot_data, type = "response"),
+    error = function(e) rep(NA_real_, nrow(boot_data))
+  )
+  pred_original_sample <- tryCatch(
+    predict(fit_boot, newdata = modelo_log_data2, type = "response"),
+    error = function(e) rep(NA_real_, nrow(modelo_log_data2))
+  )
+
+  auc_bootstrap_sample <- safe_auc2(
+    boot_data$outcome_cd4_350,
+    pred_bootstrap_sample
+  )
+  auc_original_sample <- safe_auc2(
+    modelo_log_data2$outcome_cd4_350,
+    pred_original_sample
+  )
+
+  tibble(
+    iteration = iteration,
+    AUC_bootstrap_sample = auc_bootstrap_sample,
+    AUC_original_sample = auc_original_sample,
+    optimism = auc_bootstrap_sample - auc_original_sample,
+    selected_predictors = paste(selected_boot, collapse = ";")
+  )
+}
+
+bootstrap_validation_results2 <- purrr::map_dfr(
+  seq_len(B),
+  run_bootstrap_validation2
 )
 
-cat("Bootstrap AUC summary:\n")
+bootstrap_valid_results2 <- bootstrap_validation_results2 %>%
+  filter(
+    is.finite(AUC_bootstrap_sample),
+    is.finite(AUC_original_sample),
+    is.finite(optimism)
+  )
+
+if (nrow(bootstrap_valid_results2) == 0) {
+  stop("No valid bootstrap resamples were obtained.")
+}
+
+mean_optimism2 <- mean(bootstrap_valid_results2$optimism)
+optimism_corrected_auc2 <- auc_value2 - mean_optimism2
+
+bootstrap_auc_summary <- tibble(
+  n_bootstrap_requested = B,
+  n_bootstrap_valid = nrow(bootstrap_valid_results2),
+  AUC_apparent = auc_value2,
+  mean_AUC_bootstrap_sample = mean(
+    bootstrap_valid_results2$AUC_bootstrap_sample
+  ),
+  mean_AUC_original_sample = mean(
+    bootstrap_valid_results2$AUC_original_sample
+  ),
+  mean_optimism = mean_optimism2,
+  optimism_corrected_AUC = optimism_corrected_auc2,
+  optimism_2.5_percentile = as.numeric(
+    quantile(bootstrap_valid_results2$optimism, 0.025)
+  ),
+  optimism_97.5_percentile = as.numeric(
+    quantile(bootstrap_valid_results2$optimism, 0.975)
+  )
+)
+
+# These percentiles describe the distribution of optimism; they are not a
+# 95% confidence interval for the optimism-corrected AUC.
+
+bootstrap_selection_frequency2 <- bootstrap_valid_results2 %>%
+  select(iteration, selected_predictors) %>%
+  tidyr::separate_rows(selected_predictors, sep = ";") %>%
+  filter(!is.na(selected_predictors), selected_predictors != "") %>%
+  count(selected_predictors, name = "times_selected") %>%
+  mutate(selection_frequency = times_selected / nrow(bootstrap_valid_results2)) %>%
+  arrange(desc(selection_frequency))
+
+cat("Optimism-corrected bootstrap summary:\n")
 print(bootstrap_auc_summary, width = Inf)
+cat("\nBootstrap variable-selection frequencies:\n")
+print(bootstrap_selection_frequency2, n = Inf)
 cat("\n")
 
 write_xlsx(
   list(
     "Bootstrap_AUC_summary" = bootstrap_auc_summary,
-    "Bootstrap_AUC_values" = tibble(AUC = boot_auc)
+    "Bootstrap_iterations" = bootstrap_validation_results2,
+    "Selection_frequency" = bootstrap_selection_frequency2
   ),
   path = file.path(results_path, "bootstrap_auc_logistic_zlog.xlsx")
 )
@@ -1896,9 +2005,9 @@ model_performance_table_for_article <- tibble(
     "AUC",
     "AUC 95% CI lower",
     "AUC 95% CI upper",
-    "Bootstrap mean AUC",
-    "Bootstrap AUC 95% CI lower",
-    "Bootstrap AUC 95% CI upper",
+    "Optimism-corrected AUC",
+    "Mean bootstrap optimism",
+    "Valid bootstrap resamples",
     "Brier score",
     "Youden cutoff",
     "Accuracy at Youden cutoff",
@@ -1914,9 +2023,9 @@ model_performance_table_for_article <- tibble(
     auc_value2,
     auc_ci2[1],
     auc_ci2[3],
-    bootstrap_auc_summary$AUC_bootstrap_mean,
-    bootstrap_auc_summary$AUC_bootstrap_CI_low,
-    bootstrap_auc_summary$AUC_bootstrap_CI_high,
+    bootstrap_auc_summary$optimism_corrected_AUC,
+    bootstrap_auc_summary$mean_optimism,
+    bootstrap_auc_summary$n_bootstrap_valid,
     brier_score2,
     youden_cutoff2,
     cm_youden$metrics$accuracy,
