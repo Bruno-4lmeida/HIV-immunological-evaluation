@@ -1,10 +1,12 @@
 # HIV Immunological Evaluation
 
-This repository contains the scripts and datasets used in the study:
+This repository contains the scripts and datasets used in the following studies:
 
-**“Immune signatures in HIV infection: IL-6 and viral load predict advanced immunodeficiency, while antiretroviral therapy rapidly reduces sIL-2R levels.”**
+1. **“sVCAM-1 and hematological profiles are associated with CD4-defined disease status in HIV infection.”**
 
-The purpose of this repository is to ensure **transparency, reproducibility, and reuse** of the analyses performed in the manuscript.
+2. **“Systemic inflammation and immune activation in HIV infection: IL-6 is associated with CD4-defined immunodeficiency and sIL-2R declines early after antiretroviral therapy initiation.”**
+
+The purpose of this repository is to ensure **transparency, reproducibility, and reuse** of the analyses performed in these studies.
 
 ---
 
